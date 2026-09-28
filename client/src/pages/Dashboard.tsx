@@ -6,20 +6,44 @@ import "./Dashboard.css";
 type Priority = "low" | "medium" | "high";
 type TaskFilter = "all" | "active" | "completed" | "overdue";
 
+type TaskStatus =
+  | "inbox"
+  | "next"
+  | "doing"
+  | "waiting"
+  | "done"
+  | "backlog"
+  | "ready"
+  | "in-review"
+  | "blocked";
+
 type Task = {
   id: string;
   title: string;
+  list: string;
+  status: TaskStatus;
   completed: boolean;
   priority: Priority;
   dueDate: string;
+  notes?: string;
+  recurrence?: string;
+  tags?: string[];
+  assignee?: string;
+  project?: string;
+  description?: string;
+  dependencies?: string[];
+  blocker?: boolean;
+  blockerNote?: string;
+  links?: string[];
+  estimate?: string;
+  reporter?: string;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 const API_URL = "http://localhost:5000";
 
-async function apiRequest<T>(
-  path: string,
-  options: RequestInit = {}
-): Promise<T> {
+async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
   const user = auth.currentUser;
   if (!user) throw new Error("Please sign in again.");
 
@@ -52,8 +76,13 @@ function getErrorMessage(error: unknown, fallback: string) {
 function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [title, setTitle] = useState("");
+  const [list, setList] = useState("Personal");
+  const [status, setStatus] = useState<TaskStatus>("inbox");
   const [priority, setPriority] = useState<Priority>("medium");
   const [dueDate, setDueDate] = useState("");
+  const [notes, setNotes] = useState("");
+  const [recurrence, setRecurrence] = useState("");
+  const [tagsInput, setTagsInput] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [loadingTasks, setLoadingTasks] = useState(true);
@@ -62,14 +91,21 @@ function Dashboard() {
   const loadTasks = useCallback(async () => {
     try {
       const loadedTasks = await apiRequest<Task[]>("/tasks");
+
       setTasks(
         loadedTasks.map((task) => ({
           ...task,
+          list: task.list || "Personal",
+          status: task.status || "inbox",
           completed: Boolean(task.completed),
           priority: task.priority || "medium",
           dueDate: task.dueDate || "",
+          notes: task.notes || "",
+          recurrence: task.recurrence || "",
+          tags: Array.isArray(task.tags) ? task.tags : [],
         }))
       );
+
       setError("");
     } catch (loadError) {
       setError(getErrorMessage(loadError, "Could not load tasks."));
@@ -84,18 +120,37 @@ function Dashboard() {
 
   const resetForm = () => {
     setTitle("");
+    setList("Personal");
+    setStatus("inbox");
     setPriority("medium");
     setDueDate("");
+    setNotes("");
+    setRecurrence("");
+    setTagsInput("");
     setEditingTaskId(null);
   };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const taskTitle = title.trim();
 
+    const taskTitle = title.trim();
     if (!taskTitle) return;
 
-    const body = JSON.stringify({ title: taskTitle, priority, dueDate });
+    const tags = tagsInput
+      .split(",")
+      .map((tag) => tag.trim())
+      .filter(Boolean);
+
+    const body = JSON.stringify({
+      title: taskTitle,
+      list,
+      status,
+      priority,
+      dueDate,
+      notes,
+      recurrence,
+      tags,
+    });
 
     try {
       if (editingTaskId) {
@@ -120,8 +175,13 @@ function Dashboard() {
   const startEditing = (task: Task) => {
     setEditingTaskId(task.id);
     setTitle(task.title);
-    setPriority(task.priority);
-    setDueDate(task.dueDate);
+    setList(task.list || "Personal");
+    setStatus(task.status || "inbox");
+    setPriority(task.priority || "medium");
+    setDueDate(task.dueDate || "");
+    setNotes(task.notes || "");
+    setRecurrence(task.recurrence || "");
+    setTagsInput((task.tags || []).join(", "));
     setError("");
   };
 
@@ -195,6 +255,34 @@ function Dashboard() {
           />
 
           <select
+            aria-label="Task list"
+            value={list}
+            onChange={(event) => setList(event.target.value)}
+          >
+            <option value="Personal">Personal</option>
+            <option value="Work">Work</option>
+            <option value="Errands">Errands</option>
+            <option value="Health">Health</option>
+            <option value="Learning">Learning</option>
+          </select>
+
+          <select
+            aria-label="Task status"
+            value={status}
+            onChange={(event) => setStatus(event.target.value as TaskStatus)}
+          >
+            <option value="inbox">Inbox</option>
+            <option value="next">Next</option>
+            <option value="doing">Doing</option>
+            <option value="waiting">Waiting</option>
+            <option value="done">Done</option>
+            <option value="backlog">Backlog</option>
+            <option value="ready">Ready</option>
+            <option value="in-review">In review</option>
+            <option value="blocked">Blocked</option>
+          </select>
+
+          <select
             aria-label="Task priority"
             value={priority}
             onChange={(event) => setPriority(event.target.value as Priority)}
@@ -209,6 +297,28 @@ function Dashboard() {
             type="date"
             value={dueDate}
             onChange={(event) => setDueDate(event.target.value)}
+          />
+
+          <textarea
+            aria-label="Task notes"
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            placeholder="Notes or task details"
+            rows={2}
+          />
+
+          <input
+            aria-label="Task recurrence"
+            value={recurrence}
+            onChange={(event) => setRecurrence(event.target.value)}
+            placeholder="Every Friday / every 12 months"
+          />
+
+          <input
+            aria-label="Task tags"
+            value={tagsInput}
+            onChange={(event) => setTagsInput(event.target.value)}
+            placeholder="home, urgent, calls"
           />
 
           <button type="submit">
@@ -232,23 +342,19 @@ function Dashboard() {
         )}
 
         <nav className="task-filters" aria-label="Filter tasks">
-          {(["all", "active", "completed", "overdue"] as const).map(
-            (option) => (
-              <button
-                key={option}
-                type="button"
-                aria-pressed={filter === option}
-                className={
-                  filter === option
-                    ? "filter-button selected"
-                    : "filter-button"
-                }
-                onClick={() => setFilter(option)}
-              >
-                {option[0].toUpperCase() + option.slice(1)}
-              </button>
-            )
-          )}
+          {(["all", "active", "completed", "overdue"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={filter === option}
+              className={
+                filter === option ? "filter-button selected" : "filter-button"
+              }
+              onClick={() => setFilter(option)}
+            >
+              {option[0].toUpperCase() + option.slice(1)}
+            </button>
+          ))}
         </nav>
 
         <section className="task-section" aria-label="Task list">
@@ -286,16 +392,28 @@ function Dashboard() {
                       </span>
                     </label>
 
-                    <div className="task-details">
-                      <span
-                        className={`task-priority priority-${task.priority}`}
-                      >
+                    <div className="task-meta">
+                      <span className="task-list-badge">{task.list}</span>
+                      <span className="task-status-badge">{task.status}</span>
+                      <span className={`task-priority priority-${task.priority}`}>
                         {task.priority}
                       </span>
                       {task.dueDate && (
                         <time dateTime={task.dueDate}>Due {task.dueDate}</time>
                       )}
                     </div>
+
+                    {task.notes && <p className="task-notes">{task.notes}</p>}
+
+                    {task.tags && task.tags.length > 0 && (
+                      <div className="task-tags">
+                        {task.tags.map((tag) => (
+                          <span key={`${task.id}-${tag}`} className="task-tag">
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
 
                   <div className="task-actions">
