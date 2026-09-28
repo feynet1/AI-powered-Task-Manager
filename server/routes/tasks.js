@@ -2,6 +2,115 @@ const express = require("express");
 const router = express.Router();
 const { db, adminAuth } = require("../firebaseAdmin");
 
+const WEEKDAYS = {
+  sunday: 0,
+  monday: 1,
+  tuesday: 2,
+  wednesday: 3,
+  thursday: 4,
+  friday: 5,
+  saturday: 6,
+};
+
+function parseRecurrence(rule) {
+  if (typeof rule !== "string") return null;
+
+  const value = rule.trim();
+
+  const weekdayMatch = value.match(
+    /^every\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)$/i
+  );
+
+  if (weekdayMatch) {
+    return {
+      type: "weekday",
+      day: WEEKDAYS[weekdayMatch[1].toLowerCase()],
+    };
+  }
+
+  const monthMatch = value.match(/^every\s+(\d+)\s+months?$/i);
+
+  if (monthMatch) {
+    const interval = Number(monthMatch[1]);
+
+    if (Number.isInteger(interval) && interval >= 1 && interval <= 120) {
+      return { type: "months", interval };
+    }
+  }
+
+  return null;
+}
+
+function dateOnlyAsUtc(value, fallback) {
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) {
+    const date = new Date(`${value.slice(0, 10)}T00:00:00.000Z`);
+    if (!Number.isNaN(date.getTime())) return date;
+  }
+
+  return new Date(fallback);
+}
+
+function addMonthsClamped(date, months) {
+  const targetMonth = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + months, 1)
+  );
+
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(
+      targetMonth.getUTCFullYear(),
+      targetMonth.getUTCMonth() + 1,
+      0
+    )
+  ).getUTCDate();
+
+  return new Date(
+    Date.UTC(
+      targetMonth.getUTCFullYear(),
+      targetMonth.getUTCMonth(),
+      Math.min(date.getUTCDate(), lastDayOfTargetMonth)
+    )
+  );
+}
+
+function getNextDueDate(rule, currentDueDate, completedAt) {
+  const recurrence = parseRecurrence(rule);
+  if (!recurrence) return "";
+
+  const completionDate = new Date(completedAt);
+  completionDate.setUTCHours(0, 0, 0, 0);
+
+  const baseDate = currentDueDate
+    ? dateOnlyAsUtc(currentDueDate, completionDate)
+    : new Date(completionDate);
+
+  let nextDate;
+
+  if (recurrence.type === "weekday") {
+    nextDate = new Date(baseDate);
+    const daysUntilWeekday =
+      (recurrence.day - nextDate.getUTCDay() + 7) % 7 || 7;
+
+    nextDate.setUTCDate(nextDate.getUTCDate() + daysUntilWeekday);
+
+    while (nextDate <= completionDate) {
+      nextDate.setUTCDate(nextDate.getUTCDate() + 7);
+    }
+  } else {
+    let intervalCount = 1;
+    nextDate = addMonthsClamped(baseDate, recurrence.interval);
+
+    while (nextDate <= completionDate) {
+      intervalCount += 1;
+      nextDate = addMonthsClamped(
+        baseDate,
+        recurrence.interval * intervalCount
+      );
+    }
+  }
+
+  return nextDate.toISOString().slice(0, 10);
+}
+
 router.use(async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization || "";
@@ -15,7 +124,7 @@ router.use(async (req, res, next) => {
 
     const decoded = await adminAuth.verifyIdToken(token);
     req.userId = decoded.uid;
-    next();
+    return next();
   } catch (error) {
     return res.status(401).json({ error: "Invalid or expired sign-in token." });
   }
@@ -51,6 +160,15 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "Invalid priority." });
     }
 
+    if (
+      typeof recurrence !== "string" ||
+      (recurrence.trim() && !parseRecurrence(recurrence))
+    ) {
+      return res.status(400).json({
+        error: "Use a recurrence like 'Every Friday' or 'Every 12 months'.",
+      });
+    }
+
     const allowedStatus = [
       "inbox",
       "next",
@@ -75,7 +193,7 @@ router.post("/", async (req, res) => {
       priority,
       dueDate: typeof dueDate === "string" ? dueDate : "",
       notes,
-      recurrence,
+      recurrence: recurrence.trim(),
       tags: Array.isArray(tags) ? tags : [],
       assignee,
       project,
@@ -92,10 +210,10 @@ router.post("/", async (req, res) => {
     };
 
     const ref = await db.collection("tasks").add(task);
-    res.status(201).json({ id: ref.id, ...task });
+    return res.status(201).json({ id: ref.id, ...task });
   } catch (error) {
     console.error("Create task failed:", error);
-    res.status(500).json({ error: "Could not create task." });
+    return res.status(500).json({ error: "Could not create task." });
   }
 });
 
@@ -108,6 +226,7 @@ router.get("/", async (req, res) => {
 
     const tasks = snapshot.docs.map((doc) => {
       const data = doc.data();
+
       return {
         id: doc.id,
         title: data.title,
@@ -122,7 +241,9 @@ router.get("/", async (req, res) => {
         assignee: data.assignee || "",
         project: data.project || "",
         description: data.description || "",
-        dependencies: Array.isArray(data.dependencies) ? data.dependencies : [],
+        dependencies: Array.isArray(data.dependencies)
+          ? data.dependencies
+          : [],
         blocker: Boolean(data.blocker),
         blockerNote: data.blockerNote || "",
         links: Array.isArray(data.links) ? data.links : [],
@@ -133,10 +254,10 @@ router.get("/", async (req, res) => {
       };
     });
 
-    res.json(tasks);
+    return res.json(tasks);
   } catch (error) {
     console.error("Load tasks failed:", error);
-    res.status(500).json({ error: "Could not load tasks." });
+    return res.status(500).json({ error: "Could not load tasks." });
   }
 });
 
@@ -185,6 +306,7 @@ router.put("/:id", async (req, res) => {
     }
 
     if (list !== undefined) updates.list = list;
+
     if (status !== undefined) {
       if (!allowedStatus.includes(status)) {
         return res.status(400).json({ error: "Invalid status." });
@@ -207,14 +329,28 @@ router.put("/:id", async (req, res) => {
     }
 
     if (notes !== undefined) updates.notes = notes;
-    if (recurrence !== undefined) updates.recurrence = recurrence;
+
+    if (recurrence !== undefined) {
+      if (
+        typeof recurrence !== "string" ||
+        (recurrence.trim() && !parseRecurrence(recurrence))
+      ) {
+        return res.status(400).json({
+          error: "Use a recurrence like 'Every Friday' or 'Every 12 months'.",
+        });
+      }
+      updates.recurrence = recurrence.trim();
+    }
+
     if (tags !== undefined) updates.tags = Array.isArray(tags) ? tags : [];
     if (assignee !== undefined) updates.assignee = assignee;
     if (project !== undefined) updates.project = project;
     if (description !== undefined) updates.description = description;
+
     if (dependencies !== undefined) {
       updates.dependencies = Array.isArray(dependencies) ? dependencies : [];
     }
+
     if (blocker !== undefined) updates.blocker = Boolean(blocker);
     if (blockerNote !== undefined) updates.blockerNote = blockerNote;
     if (links !== undefined) updates.links = Array.isArray(links) ? links : [];
@@ -232,18 +368,65 @@ router.put("/:id", async (req, res) => {
       return res.status(400).json({ error: "No valid task fields provided." });
     }
 
-    updates.updatedAt = new Date();
-
     const ref = db.collection("tasks").doc(req.params.id);
-    const taskDoc = await ref.get();
+    const nextRef = db.collection("tasks").doc();
+    const now = new Date();
 
-    if (!taskDoc.exists || taskDoc.data().userId !== req.userId) {
-      return res.status(404).json({ error: "Task not found." });
+    const updatedTask = await db.runTransaction(async (transaction) => {
+      const taskDoc = await transaction.get(ref);
+
+      if (!taskDoc.exists || taskDoc.data().userId !== req.userId) {
+        const notFoundError = new Error("Task not found.");
+        notFoundError.statusCode = 404;
+        throw notFoundError;
+      }
+
+      const currentTask = taskDoc.data();
+      const transactionUpdates = {
+        ...updates,
+        updatedAt: now,
+      };
+      const finalTask = { ...currentTask, ...transactionUpdates };
+
+      const wasCompleted =
+        currentTask.completed === true || currentTask.status === "done";
+      const isNowCompleted =
+        finalTask.completed === true || finalTask.status === "done";
+
+      const hasRecurrence = Boolean(parseRecurrence(finalTask.recurrence));
+      const shouldCreateNext =
+        !wasCompleted &&
+        isNowCompleted &&
+        hasRecurrence &&
+        !currentTask.recurrenceNextTaskId;
+
+      if (shouldCreateNext) {
+        transactionUpdates.recurrenceNextTaskId = nextRef.id;
+
+        const nextTask = {
+          ...finalTask,
+          status: "inbox",
+          completed: false,
+          dueDate: getNextDueDate(finalTask.recurrence, finalTask.dueDate, now),
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        delete nextTask.recurrenceNextTaskId;
+        transaction.set(nextRef, nextTask);
+      }
+
+      transaction.update(ref, transactionUpdates);
+
+      return { ...finalTask, ...transactionUpdates };
+    });
+
+    return res.json({ id: ref.id, ...updatedTask });
+  } catch (error) {
+    if (error.statusCode === 404) {
+      return res.status(404).json({ error: error.message });
     }
 
-    await ref.update(updates);
-    return res.json({ id: ref.id, ...taskDoc.data(), ...updates });
-  } catch (error) {
     console.error("Update task failed:", error);
     return res.status(500).json({ error: "Could not update task." });
   }
