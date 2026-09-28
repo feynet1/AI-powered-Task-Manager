@@ -54,7 +54,10 @@ type TaskDetailsDraft = {
   blockerNote: string;
 };
 
-const API_URL = "http://localhost:5000";
+const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:5000").replace(
+  /\/+$/,
+  ""
+);
 
 const BOARD_COLUMNS: TaskStatus[] = [
   "inbox",
@@ -366,8 +369,8 @@ function Dashboard() {
       const refreshedTasks = await loadTasks();
       const nextTask = result.recurrenceNextTaskId
         ? refreshedTasks.find(
-            (item) => item.id === result.recurrenceNextTaskId
-          )
+          (item) => item.id === result.recurrenceNextTaskId
+        )
         : undefined;
 
       if (nextTask?.dueDate) {
@@ -546,9 +549,8 @@ function Dashboard() {
               type="checkbox"
               checked={isCompleted}
               onChange={() => void toggleTask(task)}
-              aria-label={`Mark ${task.title} ${
-                isCompleted ? "active" : "complete"
-              }`}
+              aria-label={`Mark ${task.title} ${isCompleted ? "active" : "complete"
+                }`}
             />
             <span className={isCompleted ? "task-title completed" : "task-title"}>
               {task.title}
