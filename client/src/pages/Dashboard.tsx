@@ -34,14 +34,22 @@ type Task = {
   assignee?: string;
   project?: string;
   description?: string;
-  dependencies?: string[];
-  blocker?: boolean;
-  blockerNote?: string;
   links?: string[];
   estimate?: string;
-  reporter?: string;
+  blocker?: boolean;
+  blockerNote?: string;
   createdAt?: string;
   updatedAt?: string;
+};
+
+type TaskDetailsDraft = {
+  assignee: string;
+  project: string;
+  description: string;
+  links: string;
+  estimate: string;
+  blocker: boolean;
+  blockerNote: string;
 };
 
 const API_URL = "http://localhost:5000";
@@ -69,9 +77,7 @@ async function apiRequest<T>(
   const headers = new Headers(options.headers);
   headers.set("Authorization", `Bearer ${token}`);
 
-  if (options.body) {
-    headers.set("Content-Type", "application/json");
-  }
+  if (options.body) headers.set("Content-Type", "application/json");
 
   const response = await fetch(`${API_URL}${path}`, {
     ...options,
@@ -118,7 +124,12 @@ function Dashboard() {
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
 
+  const [detailTask, setDetailTask] = useState<Task | null>(null);
+  const [detailDraft, setDetailDraft] = useState<TaskDetailsDraft | null>(null);
+  const [savingDetails, setSavingDetails] = useState(false);
+
   const [filter, setFilter] = useState<TaskFilter>("all");
+  const [showCompleted, setShowCompleted] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("created-desc");
   const [viewMode, setViewMode] = useState<ViewMode>("all");
@@ -141,6 +152,7 @@ function Dashboard() {
           notes: task.notes || "",
           recurrence: task.recurrence || "",
           tags: Array.isArray(task.tags) ? task.tags : [],
+          links: Array.isArray(task.links) ? task.links : [],
         }))
       );
 
@@ -155,6 +167,58 @@ function Dashboard() {
   useEffect(() => {
     void loadTasks();
   }, [loadTasks]);
+
+  const resetDetailsModal = () => {
+    setDetailTask(null);
+    setDetailDraft(null);
+  };
+
+  const openTaskDetails = (task: Task) => {
+    setDetailTask(task);
+    setDetailDraft({
+      assignee: task.assignee || "",
+      project: task.project || "",
+      description: task.description || "",
+      links: (task.links || []).join(", "),
+      estimate: task.estimate || "",
+      blocker: Boolean(task.blocker),
+      blockerNote: task.blockerNote || "",
+    });
+  };
+
+  const saveTaskDetails = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!detailTask || !detailDraft) return;
+
+    const links = detailDraft.links
+      .split(",")
+      .map((link) => link.trim())
+      .filter(Boolean);
+
+    setSavingDetails(true);
+
+    try {
+      await apiRequest(`/tasks/${detailTask.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          assignee: detailDraft.assignee,
+          project: detailDraft.project,
+          description: detailDraft.description,
+          links,
+          estimate: detailDraft.estimate,
+          blocker: detailDraft.blocker,
+          blockerNote: detailDraft.blockerNote,
+        }),
+      });
+
+      resetDetailsModal();
+      await loadTasks();
+    } catch (saveError) {
+      setError(getErrorMessage(saveError, "Could not save task details."));
+    } finally {
+      setSavingDetails(false);
+    }
+  };
 
   const handleDropTask = async (nextStatus: TaskStatus) => {
     if (!draggedTaskId) return;
@@ -247,10 +311,17 @@ function Dashboard() {
   };
 
   const toggleTask = async (task: Task) => {
+    const isCompleted = task.completed || task.status === "done";
+
+    const update =
+      isCompleted && task.status === "done"
+        ? { completed: false, status: "inbox" as TaskStatus }
+        : { completed: !isCompleted };
+
     try {
       await apiRequest(`/tasks/${task.id}`, {
         method: "PUT",
-        body: JSON.stringify({ completed: !task.completed }),
+        body: JSON.stringify(update),
       });
       await loadTasks();
     } catch (updateError) {
@@ -271,29 +342,34 @@ function Dashboard() {
 
   const today = getLocalDateString(new Date());
 
-const filteredTasks = useMemo(() => {
-  const search = searchTerm.trim().toLowerCase();
+  const filteredTasks = useMemo(() => {
+    const search = searchTerm.trim().toLowerCase();
 
-  return tasks
-    .filter((task) => {
+    const results = tasks.filter((task) => {
+      const dueDateOnly = task.dueDate?.slice(0, 10) || "";
       const isCompleted = task.completed || task.status === "done";
-      const dueDate = task.dueDate?.slice(0, 10) ?? "";
-      const isOverdue = Boolean(dueDate) && dueDate < today;
+      const isOverdue = Boolean(dueDateOnly) && dueDateOnly < today;
 
       const searchableText = [
-  task.title,
-  task.notes || "",
-  task.list,
-  task.status,
-  task.priority,
-  task.dueDate || "",
-  task.recurrence || "",
-  ...(task.tags || []),
-]
+        task.title,
+        task.notes || "",
+        task.list,
+        task.status,
+        task.priority,
+        dueDateOnly,
+        task.recurrence || "",
+        task.assignee || "",
+        task.project || "",
+        task.description || "",
+        ...(task.tags || []),
+      ]
         .join(" ")
         .toLowerCase();
 
       const matchesSearch = !search || searchableText.includes(search);
+
+      const matchesArchive =
+        showCompleted || filter === "completed" || !isCompleted;
 
       const matchesFilter =
         filter === "all" ||
@@ -303,13 +379,21 @@ const filteredTasks = useMemo(() => {
 
       const matchesView =
         viewMode === "all" ||
-        (viewMode === "today" && dueDate === today) ||
-        (viewMode === "upcoming" && Boolean(dueDate) && dueDate > today) ||
+        (viewMode === "today" && dueDateOnly === today) ||
+        (viewMode === "upcoming" &&
+          Boolean(dueDateOnly) &&
+          dueDateOnly > today) ||
         (viewMode === "overdue" && !isCompleted && isOverdue);
 
-      return matchesSearch && matchesFilter && matchesView;
-    })
-    .sort((a, b) => {
+      return (
+        matchesArchive &&
+        matchesSearch &&
+        matchesFilter &&
+        matchesView
+      );
+    });
+
+    return [...results].sort((a, b) => {
       switch (sortMode) {
         case "priority-desc": {
           const order: Record<Priority, number> = {
@@ -319,12 +403,18 @@ const filteredTasks = useMemo(() => {
           };
           return order[b.priority] - order[a.priority];
         }
-        case "due-asc":
+
+        case "due-asc": {
+          if (!a.dueDate && !b.dueDate) return 0;
           if (!a.dueDate) return 1;
           if (!b.dueDate) return -1;
           return a.dueDate.slice(0, 10).localeCompare(b.dueDate.slice(0, 10));
+        }
+
         case "title-asc":
           return a.title.localeCompare(b.title);
+
+        case "created-desc":
         default: {
           const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
           const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
@@ -332,7 +422,15 @@ const filteredTasks = useMemo(() => {
         }
       }
     });
-}, [tasks, filter, searchTerm, sortMode, viewMode, today]);
+  }, [
+    tasks,
+    filter,
+    showCompleted,
+    searchTerm,
+    sortMode,
+    viewMode,
+    today,
+  ]);
 
   const boardTasks = useMemo(() => {
     const grouped: Record<TaskStatus, Task[]> = {
@@ -354,70 +452,86 @@ const filteredTasks = useMemo(() => {
     return grouped;
   }, [filteredTasks]);
 
-  const completedCount = tasks.filter((task) => task.completed).length;
+  const completedCount = tasks.filter(
+    (task) => task.completed || task.status === "done"
+  ).length;
 
-  const renderTaskCard = (task: Task) => (
-    <article
-      className={draggedTaskId === task.id ? "task-card dragging" : "task-card"}
-      key={task.id}
-      draggable={layoutMode === "board"}
-      onDragStart={() => setDraggedTaskId(task.id)}
-      onDragEnd={() => setDraggedTaskId(null)}
-    >
-      <div className="task-card-top">
-        <label className="task-label">
-          <input
-            type="checkbox"
-            checked={task.completed}
-            onChange={() => void toggleTask(task)}
-          />
-          <span className={task.completed ? "task-title completed" : "task-title"}>
-            {task.title}
-          </span>
-        </label>
+  const renderTaskCard = (task: Task) => {
+    const isCompleted = task.completed || task.status === "done";
 
-        <div className="task-actions">
-          <button
-            className="edit-button"
-            type="button"
-            onClick={() => startEditing(task)}
-          >
-            Edit
-          </button>
-          <button
-            className="delete-button"
-            type="button"
-            onClick={() => void removeTask(task)}
-          >
-            Delete
-          </button>
-        </div>
-      </div>
-
-      <div className="task-meta">
-        <span className="task-list-badge">{task.list}</span>
-        <span className="task-status-badge">{formatStatus(task.status)}</span>
-        <span className={`task-priority priority-${task.priority}`}>
-          {task.priority}
-        </span>
-        {task.dueDate && (
-          <time dateTime={task.dueDate}>Due {task.dueDate}</time>
-        )}
-      </div>
-
-      {task.notes && <p className="task-notes">{task.notes}</p>}
-
-      {task.tags && task.tags.length > 0 && (
-        <div className="task-tags">
-          {task.tags.map((tag) => (
-            <span key={`${task.id}-${tag}`} className="task-tag">
-              {tag}
+    return (
+      <article
+        className={draggedTaskId === task.id ? "task-card dragging" : "task-card"}
+        key={task.id}
+        draggable={layoutMode === "board"}
+        onDragStart={() => setDraggedTaskId(task.id)}
+        onDragEnd={() => setDraggedTaskId(null)}
+      >
+        <div className="task-card-top">
+          <label className="task-label">
+            <input
+              type="checkbox"
+              checked={isCompleted}
+              onChange={() => void toggleTask(task)}
+              aria-label={`Mark ${task.title} ${
+                isCompleted ? "active" : "complete"
+              }`}
+            />
+            <span className={isCompleted ? "task-title completed" : "task-title"}>
+              {task.title}
             </span>
-          ))}
+          </label>
+
+          <div className="task-actions">
+            <button
+              className="edit-button"
+              type="button"
+              onClick={() => openTaskDetails(task)}
+            >
+              Details
+            </button>
+            <button
+              className="edit-button"
+              type="button"
+              onClick={() => startEditing(task)}
+            >
+              Edit
+            </button>
+            <button
+              className="delete-button"
+              type="button"
+              onClick={() => void removeTask(task)}
+            >
+              Delete
+            </button>
+          </div>
         </div>
-      )}
-    </article>
-  );
+
+        <div className="task-meta">
+          <span className="task-list-badge">{task.list}</span>
+          <span className="task-status-badge">{formatStatus(task.status)}</span>
+          <span className={`task-priority priority-${task.priority}`}>
+            {task.priority}
+          </span>
+          {task.dueDate && (
+            <time dateTime={task.dueDate}>Due {task.dueDate}</time>
+          )}
+        </div>
+
+        {task.notes && <p className="task-notes">{task.notes}</p>}
+
+        {task.tags && task.tags.length > 0 && (
+          <div className="task-tags">
+            {task.tags.map((tag) => (
+              <span key={`${task.id}-${tag}`} className="task-tag">
+                {tag}
+              </span>
+            ))}
+          </div>
+        )}
+      </article>
+    );
+  };
 
   return (
     <main className="dashboard-page">
@@ -492,7 +606,6 @@ const filteredTasks = useMemo(() => {
           >
             List
           </button>
-
           <button
             type="button"
             className={
@@ -522,6 +635,15 @@ const filteredTasks = useMemo(() => {
             </button>
           ))}
         </nav>
+
+        <label className="show-completed-toggle">
+          <input
+            type="checkbox"
+            checked={showCompleted}
+            onChange={(event) => setShowCompleted(event.target.checked)}
+          />
+          Show completed tasks ({completedCount})
+        </label>
 
         <form className="task-form" onSubmit={handleSubmit}>
           <input
@@ -655,7 +777,6 @@ const filteredTasks = useMemo(() => {
                     {boardTasks[column].length}
                   </span>
                 </div>
-
                 <div className="kanban-cards">
                   {boardTasks[column].map(renderTaskCard)}
                 </div>
@@ -672,6 +793,154 @@ const filteredTasks = useMemo(() => {
               ))}
             </ul>
           </section>
+        )}
+
+        {detailTask && detailDraft && (
+          <div
+            className="modal-backdrop"
+            onClick={(event) => {
+              if (event.target === event.currentTarget) resetDetailsModal();
+            }}
+          >
+            <form
+              className="task-details-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="task-details-title"
+              onSubmit={(event) => void saveTaskDetails(event)}
+            >
+              <header className="modal-header">
+                <div>
+                  <p className="dashboard-eyebrow">TASK DETAILS</p>
+                  <h2 id="task-details-title">{detailTask.title}</h2>
+                </div>
+                <button
+                  className="modal-close"
+                  type="button"
+                  aria-label="Close task details"
+                  onClick={resetDetailsModal}
+                >
+                  ×
+                </button>
+              </header>
+
+              <label>
+                Assignee
+                <input
+                  value={detailDraft.assignee}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      assignee: event.target.value,
+                    })
+                  }
+                  placeholder="Name"
+                />
+              </label>
+
+              <label>
+                Project
+                <input
+                  value={detailDraft.project}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      project: event.target.value,
+                    })
+                  }
+                  placeholder="Project name"
+                />
+              </label>
+
+              <label>
+                Description
+                <textarea
+                  rows={3}
+                  value={detailDraft.description}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      description: event.target.value,
+                    })
+                  }
+                  placeholder="More details about this task"
+                />
+              </label>
+
+              <label>
+                Links <span className="field-hint">(comma-separated URLs)</span>
+                <textarea
+                  rows={2}
+                  value={detailDraft.links}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      links: event.target.value,
+                    })
+                  }
+                  placeholder="https://example.com"
+                />
+              </label>
+
+              <label>
+                Estimate
+                <input
+                  value={detailDraft.estimate}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      estimate: event.target.value,
+                    })
+                  }
+                  placeholder="e.g. 30 minutes"
+                />
+              </label>
+
+              <label className="blocker-toggle">
+                <input
+                  type="checkbox"
+                  checked={detailDraft.blocker}
+                  onChange={(event) =>
+                    setDetailDraft({
+                      ...detailDraft,
+                      blocker: event.target.checked,
+                    })
+                  }
+                />
+                This task is blocked
+              </label>
+
+              {detailDraft.blocker && (
+                <label>
+                  Blocker note
+                  <textarea
+                    rows={2}
+                    value={detailDraft.blockerNote}
+                    onChange={(event) =>
+                      setDetailDraft({
+                        ...detailDraft,
+                        blockerNote: event.target.value,
+                      })
+                    }
+                    placeholder="What is preventing progress?"
+                  />
+                </label>
+              )}
+
+              <footer className="modal-actions">
+                <button
+                  className="cancel-button"
+                  type="button"
+                  onClick={resetDetailsModal}
+                >
+                  Cancel
+                </button>
+                <button type="submit" disabled={savingDetails}>
+                  {savingDetails ? "Saving..." : "Save details"}
+                </button>
+              </footer>
+            </form>
+          </div>
         )}
       </section>
     </main>
