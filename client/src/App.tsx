@@ -19,7 +19,7 @@ function App() {
 
   if (loading) return <p>Loading...</p>;
 
-  return user ? <Dashboard uid={user.uid} /> : <Auth />;
+  return user ? <Dashboard /> : <Auth />;
 }
 
 export default App;
