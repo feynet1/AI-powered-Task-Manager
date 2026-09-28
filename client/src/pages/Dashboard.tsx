@@ -4,7 +4,8 @@ import { auth } from "../firebase";
 import "./Dashboard.css";
 
 type Priority = "low" | "medium" | "high";
-type TaskFilter = "all" | "active" | "completed" | "overdue";
+type RecurrenceUnit = "" | "days" | "weeks" | "months" | "years";
+type TaskFilter = "all" | "active" | "overdue";
 type SortMode = "created-desc" | "due-asc" | "priority-desc" | "title-asc";
 type ViewMode = "all" | "today" | "upcoming" | "overdue";
 type LayoutMode = "list" | "board";
@@ -30,6 +31,7 @@ type Task = {
   dueDate: string;
   notes?: string;
   recurrence?: string;
+  recurrenceNextTaskId?: string;
   tags?: string[];
   assignee?: string;
   project?: string;
@@ -38,8 +40,8 @@ type Task = {
   estimate?: string;
   blocker?: boolean;
   blockerNote?: string;
-  createdAt?: string;
-  updatedAt?: string;
+  createdAt?: string | Date | null;
+  updatedAt?: string | Date | null;
 };
 
 type TaskDetailsDraft = {
@@ -111,6 +113,17 @@ function formatStatus(status: TaskStatus): string {
     .join(" ");
 }
 
+function formatDate(value: string): string {
+  const date = new Date(`${value.slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(date.getTime())) return value;
+
+  return date.toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function Dashboard() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [title, setTitle] = useState("");
@@ -119,46 +132,50 @@ function Dashboard() {
   const [priority, setPriority] = useState<Priority>("medium");
   const [dueDate, setDueDate] = useState("");
   const [notes, setNotes] = useState("");
-  const [recurrence, setRecurrence] = useState("");
+  const [recurrenceInterval, setRecurrenceInterval] = useState("1");
+  const [recurrenceUnit, setRecurrenceUnit] = useState<RecurrenceUnit>("");
   const [tagsInput, setTagsInput] = useState("");
   const [editingTaskId, setEditingTaskId] = useState<string | null>(null);
-  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
-
-  const [detailTask, setDetailTask] = useState<Task | null>(null);
-  const [detailDraft, setDetailDraft] = useState<TaskDetailsDraft | null>(null);
-  const [savingDetails, setSavingDetails] = useState(false);
 
   const [filter, setFilter] = useState<TaskFilter>("all");
-  const [showCompleted, setShowCompleted] = useState(false);
+  const [archiveView, setArchiveView] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
   const [sortMode, setSortMode] = useState<SortMode>("created-desc");
   const [viewMode, setViewMode] = useState<ViewMode>("all");
   const [layoutMode, setLayoutMode] = useState<LayoutMode>("list");
+
+  const [detailTask, setDetailTask] = useState<Task | null>(null);
+  const [detailDraft, setDetailDraft] = useState<TaskDetailsDraft | null>(null);
+  const [savingDetails, setSavingDetails] = useState(false);
+  const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null);
+
   const [loadingTasks, setLoadingTasks] = useState(true);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
 
-  const loadTasks = useCallback(async () => {
+  const loadTasks = useCallback(async (): Promise<Task[]> => {
     try {
       const loadedTasks = await apiRequest<Task[]>("/tasks");
 
-      setTasks(
-        loadedTasks.map((task) => ({
-          ...task,
-          list: task.list || "Personal",
-          status: task.status || "inbox",
-          completed: Boolean(task.completed),
-          priority: task.priority || "medium",
-          dueDate: task.dueDate || "",
-          notes: task.notes || "",
-          recurrence: task.recurrence || "",
-          tags: Array.isArray(task.tags) ? task.tags : [],
-          links: Array.isArray(task.links) ? task.links : [],
-        }))
-      );
+      const normalizedTasks = loadedTasks.map((task) => ({
+        ...task,
+        list: task.list || "Personal",
+        status: task.status || "inbox",
+        completed: Boolean(task.completed),
+        priority: task.priority || "medium",
+        dueDate: task.dueDate || "",
+        notes: task.notes || "",
+        recurrence: task.recurrence || "",
+        tags: Array.isArray(task.tags) ? task.tags : [],
+        links: Array.isArray(task.links) ? task.links : [],
+      }));
 
+      setTasks(normalizedTasks);
       setError("");
+      return normalizedTasks;
     } catch (loadError) {
       setError(getErrorMessage(loadError, "Could not load tasks."));
+      return [];
     } finally {
       setLoadingTasks(false);
     }
@@ -168,81 +185,6 @@ function Dashboard() {
     void loadTasks();
   }, [loadTasks]);
 
-  const resetDetailsModal = () => {
-    setDetailTask(null);
-    setDetailDraft(null);
-  };
-
-  const openTaskDetails = (task: Task) => {
-    setDetailTask(task);
-    setDetailDraft({
-      assignee: task.assignee || "",
-      project: task.project || "",
-      description: task.description || "",
-      links: (task.links || []).join(", "),
-      estimate: task.estimate || "",
-      blocker: Boolean(task.blocker),
-      blockerNote: task.blockerNote || "",
-    });
-  };
-
-  const saveTaskDetails = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (!detailTask || !detailDraft) return;
-
-    const links = detailDraft.links
-      .split(",")
-      .map((link) => link.trim())
-      .filter(Boolean);
-
-    setSavingDetails(true);
-
-    try {
-      await apiRequest(`/tasks/${detailTask.id}`, {
-        method: "PUT",
-        body: JSON.stringify({
-          assignee: detailDraft.assignee,
-          project: detailDraft.project,
-          description: detailDraft.description,
-          links,
-          estimate: detailDraft.estimate,
-          blocker: detailDraft.blocker,
-          blockerNote: detailDraft.blockerNote,
-        }),
-      });
-
-      resetDetailsModal();
-      await loadTasks();
-    } catch (saveError) {
-      setError(getErrorMessage(saveError, "Could not save task details."));
-    } finally {
-      setSavingDetails(false);
-    }
-  };
-
-  const handleDropTask = async (nextStatus: TaskStatus) => {
-    if (!draggedTaskId) return;
-
-    const task = tasks.find((item) => item.id === draggedTaskId);
-    if (!task || task.status === nextStatus) {
-      setDraggedTaskId(null);
-      return;
-    }
-
-    try {
-      await apiRequest(`/tasks/${draggedTaskId}`, {
-        method: "PUT",
-        body: JSON.stringify({ status: nextStatus }),
-      });
-
-      setDraggedTaskId(null);
-      await loadTasks();
-    } catch (dropError) {
-      setError(getErrorMessage(dropError, "Could not move the task."));
-      setDraggedTaskId(null);
-    }
-  };
-
   const resetForm = () => {
     setTitle("");
     setList("Personal");
@@ -250,7 +192,8 @@ function Dashboard() {
     setPriority("medium");
     setDueDate("");
     setNotes("");
-    setRecurrence("");
+    setRecurrenceInterval("1");
+    setRecurrenceUnit("");
     setTagsInput("");
     setEditingTaskId(null);
   };
@@ -260,6 +203,20 @@ function Dashboard() {
 
     const taskTitle = title.trim();
     if (!taskTitle) return;
+
+    const interval = Number(recurrenceInterval);
+
+    if (
+      recurrenceUnit &&
+      (!Number.isInteger(interval) || interval < 1 || interval > 6)
+    ) {
+      setError("Repeat interval must be a whole number from 1 to 6.");
+      return;
+    }
+
+    const recurrence = recurrenceUnit
+      ? `Every ${interval} ${recurrenceUnit.slice(0, -1)}${interval === 1 ? "" : "s"}`
+      : "";
 
     const tags = tagsInput
       .split(",")
@@ -278,6 +235,8 @@ function Dashboard() {
     });
 
     try {
+      setError("");
+
       if (editingTaskId) {
         await apiRequest(`/tasks/${editingTaskId}`, {
           method: "PUT",
@@ -305,25 +264,121 @@ function Dashboard() {
     setPriority(task.priority || "medium");
     setDueDate(task.dueDate || "");
     setNotes(task.notes || "");
-    setRecurrence(task.recurrence || "");
+
+    const recurrenceMatch = task.recurrence?.match(
+      /^Every ([1-6]) (days?|weeks?|months?|years?)$/i
+    );
+
+    setRecurrenceInterval(recurrenceMatch?.[1] || "1");
+
+    if (recurrenceMatch) {
+      const matchedUnit = recurrenceMatch[2].toLowerCase();
+      const pluralUnit = matchedUnit.endsWith("s")
+        ? matchedUnit
+        : `${matchedUnit}s`;
+      setRecurrenceUnit(pluralUnit as RecurrenceUnit);
+    } else {
+      setRecurrenceUnit("");
+    }
+
     setTagsInput((task.tags || []).join(", "));
     setError("");
+    setNotice("");
+  };
+
+  const openTaskDetails = (task: Task) => {
+    setDetailTask(task);
+    setDetailDraft({
+      assignee: task.assignee || "",
+      project: task.project || "",
+      description: task.description || "",
+      links: (task.links || []).join(", "),
+      estimate: task.estimate || "",
+      blocker: Boolean(task.blocker),
+      blockerNote: task.blockerNote || "",
+    });
+  };
+
+  const closeTaskDetails = () => {
+    setDetailTask(null);
+    setDetailDraft(null);
+  };
+
+  const saveTaskDetails = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!detailTask || !detailDraft) return;
+
+    const links = detailDraft.links
+      .split(",")
+      .map((link) => link.trim())
+      .filter(Boolean);
+
+    setSavingDetails(true);
+
+    try {
+      await apiRequest(`/tasks/${detailTask.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          assignee: detailDraft.assignee,
+          project: detailDraft.project,
+          description: detailDraft.description,
+          links,
+          estimate: detailDraft.estimate,
+          blocker: detailDraft.blocker,
+          blockerNote: detailDraft.blockerNote,
+        }),
+      });
+
+      closeTaskDetails();
+      await loadTasks();
+    } catch (saveError) {
+      setError(getErrorMessage(saveError, "Could not save task details."));
+    } finally {
+      setSavingDetails(false);
+    }
   };
 
   const toggleTask = async (task: Task) => {
     const isCompleted = task.completed || task.status === "done";
-
     const update =
       isCompleted && task.status === "done"
         ? { completed: false, status: "inbox" as TaskStatus }
         : { completed: !isCompleted };
 
+    setNotice("");
+    setError("");
+
     try {
-      await apiRequest(`/tasks/${task.id}`, {
-        method: "PUT",
-        body: JSON.stringify(update),
-      });
-      await loadTasks();
+      const result = await apiRequest<{ recurrenceNextTaskId?: string }>(
+        `/tasks/${task.id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(update),
+        }
+      );
+
+      if (isCompleted) {
+        await loadTasks();
+        setNotice("Task reopened.");
+        return;
+      }
+
+      const refreshedTasks = await loadTasks();
+      const nextTask = result.recurrenceNextTaskId
+        ? refreshedTasks.find(
+            (item) => item.id === result.recurrenceNextTaskId
+          )
+        : undefined;
+
+      if (nextTask?.dueDate) {
+        setNotice(
+          `Task completed. Next task scheduled for ${formatDate(nextTask.dueDate)}.`
+        );
+      } else if (nextTask) {
+        setNotice("Task completed. The next task has been scheduled.");
+      } else {
+        setNotice("Task completed.");
+      }
     } catch (updateError) {
       setError(getErrorMessage(updateError, "Could not update the task."));
     }
@@ -337,6 +392,29 @@ function Dashboard() {
       await loadTasks();
     } catch (deleteError) {
       setError(getErrorMessage(deleteError, "Could not delete the task."));
+    }
+  };
+
+  const handleDropTask = async (nextStatus: TaskStatus) => {
+    if (!draggedTaskId) return;
+
+    const task = tasks.find((item) => item.id === draggedTaskId);
+    if (!task || task.status === nextStatus) {
+      setDraggedTaskId(null);
+      return;
+    }
+
+    try {
+      await apiRequest(`/tasks/${draggedTaskId}`, {
+        method: "PUT",
+        body: JSON.stringify({ status: nextStatus }),
+      });
+
+      setDraggedTaskId(null);
+      await loadTasks();
+    } catch (dropError) {
+      setError(getErrorMessage(dropError, "Could not move the task."));
+      setDraggedTaskId(null);
     }
   };
 
@@ -366,15 +444,12 @@ function Dashboard() {
         .join(" ")
         .toLowerCase();
 
+      const matchesArchive = archiveView ? isCompleted : !isCompleted;
       const matchesSearch = !search || searchableText.includes(search);
-
-      const matchesArchive =
-        showCompleted || filter === "completed" || !isCompleted;
 
       const matchesFilter =
         filter === "all" ||
         (filter === "active" && !isCompleted) ||
-        (filter === "completed" && isCompleted) ||
         (filter === "overdue" && !isCompleted && isOverdue);
 
       const matchesView =
@@ -404,33 +479,28 @@ function Dashboard() {
           return order[b.priority] - order[a.priority];
         }
 
-        case "due-asc": {
+        case "due-asc":
           if (!a.dueDate && !b.dueDate) return 0;
           if (!a.dueDate) return 1;
           if (!b.dueDate) return -1;
           return a.dueDate.slice(0, 10).localeCompare(b.dueDate.slice(0, 10));
-        }
 
         case "title-asc":
           return a.title.localeCompare(b.title);
 
         case "created-desc":
         default: {
-          const aTime = a.createdAt ? new Date(a.createdAt).getTime() : 0;
-          const bTime = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+          const aTime = a.createdAt
+            ? new Date(a.createdAt).getTime()
+            : 0;
+          const bTime = b.createdAt
+            ? new Date(b.createdAt).getTime()
+            : 0;
           return bTime - aTime;
         }
       }
     });
-  }, [
-    tasks,
-    filter,
-    showCompleted,
-    searchTerm,
-    sortMode,
-    viewMode,
-    today,
-  ]);
+  }, [tasks, archiveView, filter, searchTerm, sortMode, viewMode, today]);
 
   const boardTasks = useMemo(() => {
     const grouped: Record<TaskStatus, Task[]> = {
@@ -458,12 +528,15 @@ function Dashboard() {
 
   const renderTaskCard = (task: Task) => {
     const isCompleted = task.completed || task.status === "done";
+    const nextOccurrence = task.recurrenceNextTaskId
+      ? tasks.find((item) => item.id === task.recurrenceNextTaskId)
+      : undefined;
 
     return (
       <article
         className={draggedTaskId === task.id ? "task-card dragging" : "task-card"}
         key={task.id}
-        draggable={layoutMode === "board"}
+        draggable={!archiveView && layoutMode === "board"}
         onDragStart={() => setDraggedTaskId(task.id)}
         onDragEnd={() => setDraggedTaskId(null)}
       >
@@ -520,6 +593,19 @@ function Dashboard() {
 
         {task.notes && <p className="task-notes">{task.notes}</p>}
 
+        {task.recurrence && (
+          <p className="recurrence-label">Repeats: {task.recurrence}</p>
+        )}
+
+        {archiveView && task.recurrenceNextTaskId && (
+          <p className="next-occurrence">
+            Next occurrence:{" "}
+            {nextOccurrence?.dueDate
+              ? formatDate(nextOccurrence.dueDate)
+              : "Scheduled"}
+          </p>
+        )}
+
         {task.tags && task.tags.length > 0 && (
           <div className="task-tags">
             {task.tags.map((tag) => (
@@ -539,9 +625,11 @@ function Dashboard() {
         <header className="dashboard-header">
           <div>
             <p className="dashboard-eyebrow">YOUR WORKSPACE</p>
-            <h1>My tasks</h1>
+            <h1>{archiveView ? "Completed tasks" : "My tasks"}</h1>
             <p className="dashboard-subtitle">
-              {completedCount} of {tasks.length} tasks completed
+              {archiveView
+                ? `${completedCount} completed task${completedCount === 1 ? "" : "s"}`
+                : `${completedCount} of ${tasks.length} tasks completed`}
             </p>
           </div>
 
@@ -560,7 +648,7 @@ function Dashboard() {
             type="search"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
-            placeholder="Search tasks..."
+            placeholder={archiveView ? "Search completed tasks..." : "Search tasks..."}
             aria-label="Search tasks"
           />
 
@@ -577,160 +665,215 @@ function Dashboard() {
           </select>
         </div>
 
-        <nav className="dashboard-view-tabs" aria-label="Task views">
-          {(["all", "today", "upcoming", "overdue"] as const).map((option) => (
-            <button
-              key={option}
-              type="button"
-              className={viewMode === option ? "view-tab selected" : "view-tab"}
-              aria-pressed={viewMode === option}
-              onClick={() => setViewMode(option)}
-            >
-              {option === "all"
-                ? "All"
-                : option[0].toUpperCase() + option.slice(1)}
-            </button>
-          ))}
-        </nav>
-
-        <div className="layout-toggle" aria-label="Choose task layout">
+        {archiveView ? (
           <button
+            className="archive-button"
             type="button"
-            className={
-              layoutMode === "list"
-                ? "toggle-button selected"
-                : "toggle-button"
-            }
-            aria-pressed={layoutMode === "list"}
-            onClick={() => setLayoutMode("list")}
+            onClick={() => {
+              setArchiveView(false);
+              setFilter("all");
+              setViewMode("all");
+            }}
           >
-            List
+            ← Back to tasks
           </button>
-          <button
-            type="button"
-            className={
-              layoutMode === "board"
-                ? "toggle-button selected"
-                : "toggle-button"
-            }
-            aria-pressed={layoutMode === "board"}
-            onClick={() => setLayoutMode("board")}
-          >
-            Board
-          </button>
-        </div>
+        ) : (
+          <>
+            <nav className="dashboard-view-tabs" aria-label="Task views">
+              {(["all", "today", "upcoming", "overdue"] as const).map(
+                (option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    className={
+                      viewMode === option ? "view-tab selected" : "view-tab"
+                    }
+                    aria-pressed={viewMode === option}
+                    onClick={() => setViewMode(option)}
+                  >
+                    {option === "all"
+                      ? "All"
+                      : option[0].toUpperCase() + option.slice(1)}
+                  </button>
+                )
+              )}
+            </nav>
 
-        <nav className="task-filters" aria-label="Filter tasks">
-          {(["all", "active", "completed", "overdue"] as const).map((option) => (
+            <div className="layout-toggle" aria-label="Choose task layout">
+              <button
+                type="button"
+                className={
+                  layoutMode === "list"
+                    ? "toggle-button selected"
+                    : "toggle-button"
+                }
+                aria-pressed={layoutMode === "list"}
+                onClick={() => setLayoutMode("list")}
+              >
+                List
+              </button>
+              <button
+                type="button"
+                className={
+                  layoutMode === "board"
+                    ? "toggle-button selected"
+                    : "toggle-button"
+                }
+                aria-pressed={layoutMode === "board"}
+                onClick={() => setLayoutMode("board")}
+              >
+                Board
+              </button>
+            </div>
+
+            <nav className="task-filters" aria-label="Filter tasks">
+              {(["all", "active", "overdue"] as const).map((option) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={filter === option}
+                  className={
+                    filter === option ? "filter-button selected" : "filter-button"
+                  }
+                  onClick={() => setFilter(option)}
+                >
+                  {option[0].toUpperCase() + option.slice(1)}
+                </button>
+              ))}
+            </nav>
+
             <button
-              key={option}
+              className="archive-button"
               type="button"
-              aria-pressed={filter === option}
-              className={
-                filter === option ? "filter-button selected" : "filter-button"
-              }
-              onClick={() => setFilter(option)}
+              onClick={() => {
+                setArchiveView(true);
+                setFilter("all");
+                setViewMode("all");
+              }}
             >
-              {option[0].toUpperCase() + option.slice(1)}
+              Completed ({completedCount})
             </button>
-          ))}
-        </nav>
 
-        <label className="show-completed-toggle">
-          <input
-            type="checkbox"
-            checked={showCompleted}
-            onChange={(event) => setShowCompleted(event.target.checked)}
-          />
-          Show completed tasks ({completedCount})
-        </label>
+            <form className="task-form" onSubmit={handleSubmit}>
+              <input
+                aria-label="Task title"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="What do you need to get done?"
+                required
+              />
 
-        <form className="task-form" onSubmit={handleSubmit}>
-          <input
-            aria-label="Task title"
-            value={title}
-            onChange={(event) => setTitle(event.target.value)}
-            placeholder="What do you need to get done?"
-            required
-          />
+              <select
+                aria-label="Task list"
+                value={list}
+                onChange={(event) => setList(event.target.value)}
+              >
+                <option value="Personal">Personal</option>
+                <option value="Work">Work</option>
+                <option value="Errands">Errands</option>
+                <option value="Health">Health</option>
+                <option value="Learning">Learning</option>
+              </select>
 
-          <select
-            aria-label="Task list"
-            value={list}
-            onChange={(event) => setList(event.target.value)}
-          >
-            <option value="Personal">Personal</option>
-            <option value="Work">Work</option>
-            <option value="Errands">Errands</option>
-            <option value="Health">Health</option>
-            <option value="Learning">Learning</option>
-          </select>
+              <select
+                aria-label="Task status"
+                value={status}
+                onChange={(event) => setStatus(event.target.value as TaskStatus)}
+              >
+                {BOARD_COLUMNS.map((option) => (
+                  <option key={option} value={option}>
+                    {formatStatus(option)}
+                  </option>
+                ))}
+              </select>
 
-          <select
-            aria-label="Task status"
-            value={status}
-            onChange={(event) => setStatus(event.target.value as TaskStatus)}
-          >
-            {BOARD_COLUMNS.map((option) => (
-              <option key={option} value={option}>
-                {formatStatus(option)}
-              </option>
-            ))}
-          </select>
+              <select
+                aria-label="Task priority"
+                value={priority}
+                onChange={(event) => setPriority(event.target.value as Priority)}
+              >
+                <option value="low">Low priority</option>
+                <option value="medium">Medium priority</option>
+                <option value="high">High priority</option>
+              </select>
 
-          <select
-            aria-label="Task priority"
-            value={priority}
-            onChange={(event) => setPriority(event.target.value as Priority)}
-          >
-            <option value="low">Low priority</option>
-            <option value="medium">Medium priority</option>
-            <option value="high">High priority</option>
-          </select>
+              <input
+                aria-label="Task due date"
+                type="date"
+                value={dueDate}
+                onChange={(event) => setDueDate(event.target.value)}
+              />
 
-          <input
-            aria-label="Task due date"
-            type="date"
-            value={dueDate}
-            onChange={(event) => setDueDate(event.target.value)}
-          />
+              <label className="recurrence-controls">
+                Repeat every
+                <input
+                  type="number"
+                  min="1"
+                  max="6"
+                  value={recurrenceInterval}
+                  disabled={!recurrenceUnit}
+                  onChange={(event) => setRecurrenceInterval(event.target.value)}
+                  aria-label="Repeat interval"
+                />
+                <select
+                  value={recurrenceUnit}
+                  onChange={(event) =>
+                    setRecurrenceUnit(event.target.value as RecurrenceUnit)
+                  }
+                  aria-label="Repeat unit"
+                >
+                  <option value="">Does not repeat</option>
+                  <option value="days">day(s)</option>
+                  <option value="weeks">week(s)</option>
+                  <option value="months">month(s)</option>
+                  <option value="years">year(s)</option>
+                </select>
+              </label>
 
-          <textarea
-            aria-label="Task notes"
-            value={notes}
-            onChange={(event) => setNotes(event.target.value)}
-            placeholder="Notes or task details"
-            rows={2}
-          />
+              <textarea
+                aria-label="Task notes"
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+                placeholder="Notes"
+                rows={2}
+              />
 
-          <input
-            aria-label="Task recurrence"
-            value={recurrence}
-            onChange={(event) => setRecurrence(event.target.value)}
-            placeholder="Every Friday / every 12 months"
-          />
+              <input
+                aria-label="Task tags"
+                value={tagsInput}
+                onChange={(event) => setTagsInput(event.target.value)}
+                placeholder="Tags, separated by commas"
+              />
 
-          <input
-            aria-label="Task tags"
-            value={tagsInput}
-            onChange={(event) => setTagsInput(event.target.value)}
-            placeholder="home, urgent, calls"
-          />
+              <button type="submit">
+                {editingTaskId ? "Save changes" : "Add task"}
+              </button>
 
-          <button type="submit">
-            {editingTaskId ? "Save changes" : "Add task"}
-          </button>
+              {editingTaskId && (
+                <button
+                  className="cancel-button"
+                  type="button"
+                  onClick={resetForm}
+                >
+                  Cancel
+                </button>
+              )}
+            </form>
+          </>
+        )}
 
-          {editingTaskId && (
+        {notice && (
+          <p className="dashboard-notice" role="status">
+            {notice}
             <button
-              className="cancel-button"
               type="button"
-              onClick={resetForm}
+              onClick={() => setNotice("")}
+              aria-label="Dismiss notification"
             >
-              Cancel
+              ×
             </button>
-          )}
-        </form>
+          </p>
+        )}
 
         {error && (
           <p className="dashboard-error" role="alert">
@@ -749,17 +892,21 @@ function Dashboard() {
           <div className="empty-state">
             <span className="empty-icon">✓</span>
             <h2>
-              {tasks.length === 0
-                ? "Your task list is clear"
-                : "No matching tasks"}
+              {archiveView
+                ? "No completed tasks"
+                : tasks.length === 0
+                  ? "Your task list is clear"
+                  : "No matching tasks"}
             </h2>
             <p>
-              {tasks.length === 0
-                ? "Add a task above to get started."
-                : "Try a different filter, view, or search."}
+              {archiveView
+                ? "Completed tasks will appear here."
+                : tasks.length === 0
+                  ? "Add a task above to get started."
+                  : "Try a different filter, view, or search."}
             </p>
           </div>
-        ) : layoutMode === "board" ? (
+        ) : layoutMode === "board" && !archiveView ? (
           <section className="kanban-board" aria-label="Kanban board">
             {BOARD_COLUMNS.map((column) => (
               <div
@@ -784,7 +931,10 @@ function Dashboard() {
             ))}
           </section>
         ) : (
-          <section className="task-section" aria-label="Task list">
+          <section
+            className="task-section"
+            aria-label={archiveView ? "Completed task archive" : "Task list"}
+          >
             <ul className="task-list">
               {filteredTasks.map((task) => (
                 <li className="task-item" key={task.id}>
@@ -799,7 +949,7 @@ function Dashboard() {
           <div
             className="modal-backdrop"
             onClick={(event) => {
-              if (event.target === event.currentTarget) resetDetailsModal();
+              if (event.target === event.currentTarget) closeTaskDetails();
             }}
           >
             <form
@@ -818,7 +968,7 @@ function Dashboard() {
                   className="modal-close"
                   type="button"
                   aria-label="Close task details"
-                  onClick={resetDetailsModal}
+                  onClick={closeTaskDetails}
                 >
                   ×
                 </button>
@@ -931,7 +1081,7 @@ function Dashboard() {
                 <button
                   className="cancel-button"
                   type="button"
-                  onClick={resetDetailsModal}
+                  onClick={closeTaskDetails}
                 >
                   Cancel
                 </button>

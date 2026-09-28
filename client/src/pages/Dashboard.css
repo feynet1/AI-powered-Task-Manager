@@ -1134,3 +1134,40 @@
   height: 17px;
   accent-color: #3b82f6;
 }
+.archive-button {
+  margin: 0 0 16px;
+  padding: 9px 13px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 9px;
+  background: #111c32;
+  color: #e2e8f0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.dashboard-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  border-radius: 10px;
+  background: rgba(22, 101, 52, 0.22);
+  color: #bbf7d0;
+}
+
+.dashboard-notice button {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+
+.recurrence-label,
+.next-occurrence {
+  margin: 8px 0 0;
+  color: #94a3b8;
+  font-size: 0.9rem;
+}

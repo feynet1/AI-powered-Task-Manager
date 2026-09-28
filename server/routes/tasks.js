@@ -12,6 +12,18 @@ const WEEKDAYS = {
   saturday: 6,
 };
 
+const ALLOWED_STATUSES = [
+  "inbox",
+  "next",
+  "doing",
+  "waiting",
+  "done",
+  "backlog",
+  "ready",
+  "in-review",
+  "blocked",
+];
+
 function parseRecurrence(rule) {
   if (typeof rule !== "string") return null;
 
@@ -28,17 +40,17 @@ function parseRecurrence(rule) {
     };
   }
 
-  const monthMatch = value.match(/^every\s+(\d+)\s+months?$/i);
+  const intervalMatch = value.match(
+    /^every\s+([1-6])\s+(days?|weeks?|months?|years?)$/i
+  );
 
-  if (monthMatch) {
-    const interval = Number(monthMatch[1]);
+  if (!intervalMatch) return null;
 
-    if (Number.isInteger(interval) && interval >= 1 && interval <= 120) {
-      return { type: "months", interval };
-    }
-  }
-
-  return null;
+  return {
+    type: "interval",
+    interval: Number(intervalMatch[1]),
+    unit: intervalMatch[2].toLowerCase().replace(/s$/, ""),
+  };
 }
 
 function dateOnlyAsUtc(value, fallback) {
@@ -87,6 +99,7 @@ function getNextDueDate(rule, currentDueDate, completedAt) {
 
   if (recurrence.type === "weekday") {
     nextDate = new Date(baseDate);
+
     const daysUntilWeekday =
       (recurrence.day - nextDate.getUTCDay() + 7) % 7 || 7;
 
@@ -96,15 +109,33 @@ function getNextDueDate(rule, currentDueDate, completedAt) {
       nextDate.setUTCDate(nextDate.getUTCDate() + 7);
     }
   } else {
+    const unitDays = {
+      day: 1,
+      week: 7,
+    };
+
     let intervalCount = 1;
-    nextDate = addMonthsClamped(baseDate, recurrence.interval);
+
+    const calculateDate = (count) => {
+      const amount = recurrence.interval * count;
+
+      if (recurrence.unit in unitDays) {
+        const date = new Date(baseDate);
+        date.setUTCDate(
+          date.getUTCDate() + amount * unitDays[recurrence.unit]
+        );
+        return date;
+      }
+
+      const months = recurrence.unit === "year" ? amount * 12 : amount;
+      return addMonthsClamped(baseDate, months);
+    };
+
+    nextDate = calculateDate(intervalCount);
 
     while (nextDate <= completionDate) {
       intervalCount += 1;
-      nextDate = addMonthsClamped(
-        baseDate,
-        recurrence.interval * intervalCount
-      );
+      nextDate = calculateDate(intervalCount);
     }
   }
 
@@ -125,7 +156,7 @@ router.use(async (req, res, next) => {
     const decoded = await adminAuth.verifyIdToken(token);
     req.userId = decoded.uid;
     return next();
-  } catch (error) {
+  } catch {
     return res.status(401).json({ error: "Invalid or expired sign-in token." });
   }
 });
@@ -165,23 +196,12 @@ router.post("/", async (req, res) => {
       (recurrence.trim() && !parseRecurrence(recurrence))
     ) {
       return res.status(400).json({
-        error: "Use a recurrence like 'Every Friday' or 'Every 12 months'.",
+        error:
+          "Use a recurrence like 'Every Friday' or an interval from 1 to 6, such as 'Every 2 weeks'.",
       });
     }
 
-    const allowedStatus = [
-      "inbox",
-      "next",
-      "doing",
-      "waiting",
-      "done",
-      "backlog",
-      "ready",
-      "in-review",
-      "blocked",
-    ];
-
-    if (!allowedStatus.includes(status)) {
+    if (!ALLOWED_STATUSES.includes(status)) {
       return res.status(400).json({ error: "Invalid status." });
     }
 
@@ -237,6 +257,7 @@ router.get("/", async (req, res) => {
         dueDate: data.dueDate || "",
         notes: data.notes || "",
         recurrence: data.recurrence || "",
+        recurrenceNextTaskId: data.recurrenceNextTaskId || "",
         tags: Array.isArray(data.tags) ? data.tags : [],
         assignee: data.assignee || "",
         project: data.project || "",
@@ -284,18 +305,6 @@ router.put("/:id", async (req, res) => {
       completed,
     } = req.body;
 
-    const allowedStatus = [
-      "inbox",
-      "next",
-      "doing",
-      "waiting",
-      "done",
-      "backlog",
-      "ready",
-      "in-review",
-      "blocked",
-    ];
-
     const updates = {};
 
     if (title !== undefined) {
@@ -308,7 +317,7 @@ router.put("/:id", async (req, res) => {
     if (list !== undefined) updates.list = list;
 
     if (status !== undefined) {
-      if (!allowedStatus.includes(status)) {
+      if (!ALLOWED_STATUSES.includes(status)) {
         return res.status(400).json({ error: "Invalid status." });
       }
       updates.status = status;
@@ -336,7 +345,8 @@ router.put("/:id", async (req, res) => {
         (recurrence.trim() && !parseRecurrence(recurrence))
       ) {
         return res.status(400).json({
-          error: "Use a recurrence like 'Every Friday' or 'Every 12 months'.",
+          error:
+            "Use a recurrence like 'Every Friday' or an interval from 1 to 6, such as 'Every 2 weeks'.",
         });
       }
       updates.recurrence = recurrence.trim();
@@ -382,18 +392,15 @@ router.put("/:id", async (req, res) => {
       }
 
       const currentTask = taskDoc.data();
-      const transactionUpdates = {
-        ...updates,
-        updatedAt: now,
-      };
+      const transactionUpdates = { ...updates, updatedAt: now };
       const finalTask = { ...currentTask, ...transactionUpdates };
 
       const wasCompleted =
         currentTask.completed === true || currentTask.status === "done";
       const isNowCompleted =
         finalTask.completed === true || finalTask.status === "done";
-
       const hasRecurrence = Boolean(parseRecurrence(finalTask.recurrence));
+
       const shouldCreateNext =
         !wasCompleted &&
         isNowCompleted &&
@@ -407,7 +414,11 @@ router.put("/:id", async (req, res) => {
           ...finalTask,
           status: "inbox",
           completed: false,
-          dueDate: getNextDueDate(finalTask.recurrence, finalTask.dueDate, now),
+          dueDate: getNextDueDate(
+            finalTask.recurrence,
+            finalTask.dueDate,
+            now
+          ),
           createdAt: now,
           updatedAt: now,
         };
@@ -417,7 +428,6 @@ router.put("/:id", async (req, res) => {
       }
 
       transaction.update(ref, transactionUpdates);
-
       return { ...finalTask, ...transactionUpdates };
     });
 
