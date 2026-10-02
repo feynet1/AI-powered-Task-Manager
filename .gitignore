@@ -1,0 +1,15 @@
+# Root project
+node_modules/
+dist/
+.vite/
+*.log
+
+# Client app
+client/node_modules/
+client/dist/
+client/.vite/
+
+# Server app
+server/node_modules/
+server/*.json
+server/ai-task-manager-*.json
