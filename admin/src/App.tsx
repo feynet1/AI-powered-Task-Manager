@@ -70,66 +70,71 @@ export default function App() {
   const [loginPassword, setLoginPassword] = useState("");
   const [signingIn, setSigningIn] = useState(false);
 
-  const refreshAdminData = async (currentUser: User | null = user) => {
-    if (!currentUser) {
-      setSummary(null);
-      setTasks([]);
-      return;
-    }
-
-    try {
-      const token = await currentUser.getIdToken();
-      const [overviewRes, tasksRes, usersRes] = await Promise.all([
-        fetch(`${API_URL}/admin/overview`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        fetch(`${API_URL}/admin/tasks`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-        fetch(`${API_URL}/admin/users`, {
-          headers: { Authorization: `Bearer ${token}` },
-        }),
-      ]);
-
-      if (!overviewRes.ok || !tasksRes.ok || !usersRes.ok) {
-        const overviewPayload = await overviewRes.json().catch(() => ({}));
-        const tasksPayload = await tasksRes.json().catch(() => ({}));
-        const usersPayload = await usersRes.json().catch(() => ({}));
-        throw new Error(
-          overviewPayload.error || tasksPayload.error || usersPayload.error || "Admin access is required."
-        );
+  const refreshAdminData = useCallback(
+    async (currentUser: User | null = user) => {
+      if (!currentUser) {
+        setSummary(null);
+        setTasks([]);
+        return;
       }
 
-      const overview = await overviewRes.json();
-      const taskList = await tasksRes.json();
-      const userList = await usersRes.json();
+      try {
+        const token = await currentUser.getIdToken();
+        const [overviewRes, tasksRes, usersRes] = await Promise.all([
+          fetch(`${API_URL}/admin/overview`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(`${API_URL}/admin/tasks`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+          fetch(`${API_URL}/admin/users`, {
+            headers: { Authorization: `Bearer ${token}` },
+          }),
+        ]);
 
-      setSummary(overview);
-      setTasks(taskList);
-      setUsers(userList);
-      setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to load admin data.");
-      setSummary(null);
-      setTasks([]);
-      setUsers([]);
-    }
-  };
+        if (!overviewRes.ok || !tasksRes.ok || !usersRes.ok) {
+          const overviewPayload = await overviewRes.json().catch(() => ({}));
+          const tasksPayload = await tasksRes.json().catch(() => ({}));
+          const usersPayload = await usersRes.json().catch(() => ({}));
+          throw new Error(
+            overviewPayload.error || tasksPayload.error || usersPayload.error || "Admin access is required."
+          );
+        }
+
+        const overview = await overviewRes.json();
+        const taskList = await tasksRes.json();
+        const userList = await usersRes.json();
+
+        setSummary(overview);
+        setTasks(taskList);
+        setUsers(userList);
+        setError("");
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Unable to load admin data.");
+        setSummary(null);
+        setTasks([]);
+        setUsers([]);
+      }
+    },
+    [user]
+  );
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+    const unsubscribe = onAuthStateChanged(auth, async (nextUser) => {
       setUser(nextUser);
       setLoading(false);
+
+      if (nextUser) {
+        await refreshAdminData(nextUser);
+      } else {
+        setSummary(null);
+        setTasks([]);
+        setUsers([]);
+      }
     });
 
     return unsubscribe;
-  }, []);
-
-  useEffect(() => {
-    if (user) {
-      refreshAdminData(user);
-    }
-  }, [user]);
+  }, [refreshAdminData]);
 
   const filteredTasks = useMemo(() => {
     const term = search.toLowerCase().trim();
